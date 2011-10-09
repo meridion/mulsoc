@@ -6,6 +6,10 @@
 """
 
 from mulsoc import SocketMultiplexer, ManagedSocket
-from rpcbridge import ForkedRPCBridge
-from events import DeferredCall, PeriodicCall
+from os import name as os_name
+if os_name == 'posix':
+    from rpcbridge import ForkedRPCBridge
+del os_name
+from events import DeferredCall, PeriodicCall, PropegatingCall
+from netrpc import NetRPCSocket
 
