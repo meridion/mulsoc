@@ -12,7 +12,12 @@ from time import time
 import errno
 from events import DeadEventQueue, DeferredCall
 from struct import calcsize, pack, unpack
-from fcntl import ioctl
+from os import name as os_name
+if os_name == 'posix':
+    from fcntl import ioctl
+else:
+    ioctl = None
+del os_name
 from array import array
 
 # IO Control constants
@@ -88,6 +93,9 @@ class CInterfaceRequest(object):
     _int_size = calcsize('i')
 
     def __init__(self):
+        """
+            Init function of CInterfaceRequest. 
+        """
         self.name = ''
 
         # The following members are all in a union
@@ -96,6 +104,12 @@ class CInterfaceRequest(object):
         self.index = 0
 
     def calcsize(self):
+        """
+            Function that returns the size of a CInterfaceRequest
+            
+            Output:
+            - 'self._size' : size of the CInterfaceRequest
+        """
         return self._size
 
     def fromPack(self, pack):
@@ -144,6 +158,9 @@ class CInterfaceConfig(object):
     _csize = size2C(_size)
 
     def __init__(self):
+        """
+            Init function of CInterfaceConfig. 
+        """
         self.buf_len = 0x0
         self.buf_ptr = 0x0
 
@@ -433,7 +450,11 @@ class ManagedSocket(object):
             # To prevent could not start listening bug?
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-            self._ip =  self._port = None
+            z_sockname = self._sock.getsockname()
+            if type(z_sockname) is tuple:
+                self._ip, self._port = z_sockname
+            else:
+                self._ip = self._port = None
             self._peer_ip, self._peer_port = port
             self._state = ManagedSocket.CONNECTED
             muxer.addReader(self)
@@ -441,7 +462,7 @@ class ManagedSocket(object):
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._ip = ip
             self._port = port
-            self._peer_ip =  self._peer_port = None
+            self._peer_ip = self._peer_port = None
             self._state = ManagedSocket.UNBOUND
 
         # Setup common states
@@ -478,6 +499,7 @@ class ManagedSocket(object):
         self._sock.listen(queue_length)
         self.muxer.addReader(self)
         self._state = ManagedSocket.LISTENING
+        self.onListen()
         return True
 
     def connect(self):
@@ -508,22 +530,24 @@ class ManagedSocket(object):
 
         try:
             self._sock.connect((self._ip, self._port))
-            self._state = ManagedSocket.CONNECTED
-            self._ip, self._port = self._sock.getsockname()
-            self._peer_ip, self._peer_port = self._sock.getpeername()
-            self.onConnect()
-            self.muxer.addReader(self)
-            self.muxer.delWriter(self)
+            raise socket.error(errno.EISCONN, '')
         except socket.error, e:
             error = e.args[0]
-            if error in (errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ECONNRESET):
+            if error == errno.ECONNREFUSED or error == errno.ETIMEDOUT:
                 self._state = ManagedSocket.DISCONNECTED
                 self.muxer.delWriter(self)
                 self.onConnectionRefuse()
                 return False
             elif error == errno.EAGAIN:
                 return False
-            elif error != errno.EINPROGRESS:
+            if error == errno.EISCONN:
+                self._state = ManagedSocket.CONNECTED
+                self._ip, self._port = self._sock.getsockname()
+                self._peer_ip, self._peer_port = self._sock.getpeername()
+                self.onConnect()
+                self.muxer.addReader(self)
+                self.muxer.delWriter(self)
+            elif error not in [errno.EINPROGRESS, errno.EWOULDBLOCK]:
                 raise e
         return True
 
@@ -570,7 +594,7 @@ class ManagedSocket(object):
             try:
                 while self._state == ManagedSocket.LISTENING:
                     conn, addr = self._sock.accept()
-                    self.onAccept(self.muxer._sock(self.muxer, (conn,), addr))
+                    self.onAccept(self.onPreAccept()(self.muxer, (conn,), addr))
             except socket.error, e:
                 error = e.args[0]
                 if error not in (errno.EWOULDBLOCK, errno.EINTR, errno.EMFILE):
@@ -666,13 +690,6 @@ class ManagedSocket(object):
         self._state = ManagedSocket.CLOSED
         return True
 
-    # The following IP and port detection code was heavily based upon
-    # the following 2 activestate recipes:
-    """
-http://code.activestate.com/recipes/439094-get-the-ip-address-associated-with-a-network-inter/
-
-http://code.activestate.com/recipes/439093-get-names-of-all-up-network-interfaces-linux-only/
-    """
     # A lot of info also came from <net/if.h> and <ioctl.h>
 
     # NOTE: This code does NOT support IPv6, which luckily for us isn't a
@@ -685,9 +702,17 @@ http://code.activestate.com/recipes/439093-get-names-of-all-up-network-interface
             Returns a list of strings representing the working
             interfaces in the system. (Interfaces that are down are not
             included in this list)
+            
+            The following IP and port detection code was heavily based upon
+            the following 2 activestate recipes:
+            http://code.activestate.com/recipes/439094-get-the-ip-address-associated-with-a-network-inter/
+            http://code.activestate.com/recipes/439093-get-names-of-all-up-network-interfaces-linux-only/
         """
 
         if self.isClosed():
+            return []
+
+        if ioctl is None:
             return []
 
         # This function is currenly implemented to receive a maximum of
@@ -705,9 +730,7 @@ http://code.activestate.com/recipes/439093-get-names-of-all-up-network-interface
         ifconf.buf_ptr = ifreqbuf.buffer_info()[0]
 
         # Query interfaces
-        fno = self.fileno()
-        loq = ifconf.lock()
-        ioctl(fno, SIOCGIFCONF, loq)
+        ioctl(self.fileno(), SIOCGIFCONF, ifconf.lock())
 
         # Update data from kernel
         ifconf.unlock()
@@ -763,15 +786,16 @@ http://code.activestate.com/recipes/439093-get-names-of-all-up-network-interface
         if self.isClosed():
             return None
 
+        if ioctl is None:
+            return None
+
         ifreq = CInterfaceRequest()
         ifreq.name = name
 
         # Do kernel call
         # This might throw an exception if an invalid
         # interface name is passed.
-        fno = self.fileno()
-        loq = ifreq.lock()
-        ioctl(fno, SIOCGIFADDR, loq)
+        ioctl(self.fileno(), SIOCGIFADDR, ifreq.lock())
 
         # Update data from kernel
         ifreq.unlock()
@@ -867,9 +891,21 @@ http://code.activestate.com/recipes/439093-get-names-of-all-up-network-interface
             Called when successfully connected to a server.
         """
 
+    def onListen(self):
+        """
+            Called upon initialisation of a listening socket.
+        """
+
     def onAccept(self, sock):
         """
             Called whenever a new client is accepted on a socket that was
             listening. 'sock' is the accepted socket.
         """
+
+    def onPreAccept(self):
+        """
+            This function should return a socket class type that is to accept
+            the new connection.
+        """
+        return type(self)
 

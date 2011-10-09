@@ -16,23 +16,35 @@ class DeadEvent(object):
     """
 
     def __init__(self, delay):
+        """
+            Init function of a dead event
+        """
         delay = float(delay)
         self.delay = delay
         self.odelay = delay
 
     def trigger(self, eq):
         """
-Method called when event occurs.
+            Method called when event occurs.
         """
         pass
 
     def getDelay(self):
+        """
+            Function that returns the delay of an event
+            
+            Output:
+            - 'self.delay' : the delay of the event
+        """
         return self.delay
 
     def elapseTime(self, time, eq):
         """
             Elapse 'time' units of time.
             If the event is triggered the function returns True
+            
+            Output:
+            - 'True' or 'False' : boolean
         """
 
         self.delay -= time
@@ -68,13 +80,45 @@ class DeferredCall(DeadEvent):
     """
 
     def __init__(self, delay, call, *args, **kargs):
+        """
+            Init function of a deferred call.
+        """
         DeadEvent.__init__(self, delay)
         self.call = call
         self.args = args
         self.kargs = kargs
 
+    def reset(self):
+        """
+            Reset delay.
+        """
+        self.delay = self.odelay
+
     def trigger(self, eq):
+        """
+            The function that triggers a call.
+        """
         self.call(*self.args, **self.kargs)
+
+class PropagatingCall(DeferredCall):
+    """
+        This event is useful for writing special forms of
+        PeriodicCalls. This event is special in that
+        it passes itself and the event queue to the called function.
+    """
+
+    def trigger(self, eq):
+        """
+           Function that triggers a call.
+        """
+        self.call(self, eq, *self.args, **self.kargs)
+
+    def arguments(self, *args, **kargs):
+        """
+            Modify function arguments.
+        """
+        self.args = args
+        self.kargs = kargs
 
 class PeriodicCall(DeferredCall):
     """
@@ -83,12 +127,18 @@ class PeriodicCall(DeferredCall):
     """
 
     def trigger(self, eq):
+        """
+            Function that triggers the call.
+        """
         if self.call(*self.args, **self.kargs):
-            self.delay = self.odelay
+            self.reset()
             eq.scheduleEvent(self)
 
 class DeadEventQueue(object):
     def __init__(self):
+        """
+            Init function of the dead event queue.
+        """
         self.events = []
         self.isheap = True
         self.elapsing = False
@@ -150,7 +200,7 @@ class DeadEventQueue(object):
             heappop(self.events)
         for ev in self.events[1:]: ev.elapseTime(time, self)
         self.elapsing = False
- 
+
         # Insert events scheduled in the mean time
         for ev in self.scheds: self.scheduleEvent(ev)
         for ev in self.cancels: self.cancelEvent(ev)
@@ -161,6 +211,8 @@ class DeadEventQueue(object):
     def nextEventTicks(self):
         """
             Returns the ticks remaining till the next event.
+            
+            Returns none if there is no other event.
         """
 
         # Guarantee heap structure
